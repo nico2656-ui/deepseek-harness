@@ -2,13 +2,16 @@
  * Serialize harness messages into DeepSeek chat completions. User text is joined; assistant text
  * becomes `content`, tool calls become `tool_calls`, and tool results become separate tool messages.
  * Assistant reasoning is replayed as `reasoning_content` only on tool-call turns, as required by
- * thinking-mode passback. Core image blocks are rejected explicitly because this wire route is text-only;
- * unknown declaration-merged block types retain the adapter's documented extension fallback.
+ * thinking-mode passback. Durable image references serialize as explicit `[image-attachment]` text
+ * markers because this wire route is text-only — the marker keeps the model informed without silently
+ * erasing the block, and throwing instead would brick the session (the block is durable history, so
+ * every later turn would re-fail). Unknown declaration-merged block types retain the adapter's
+ * documented extension fallback.
  * @module dsh-llm-deepseek/serialize
  */
 
-import { contentHasImage, LlmError } from '@deepseek-ai/dsh-llm'
-import type { ContentBlock, GenerateOptions, Message } from '@deepseek-ai/dsh-llm'
+import { LlmError } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, GenerateOptions, ImageBlock, Message } from '@deepseek-ai/dsh-llm'
 import type { WireMessage, WireRequest, WireTool } from './types.ts'
 
 /** Adapter-level request defaults (from plugin config). */
@@ -52,19 +55,46 @@ function resolveThinking(options: GenerateOptions, defaults: RequestDefaults): R
   return defaults.thinking === undefined ? {} : { thinking: defaults.thinking }
 }
 
-/** Join the text blocks of a message (used for user/tool-result content). */
-function flattenText(blocks: ContentBlock[]): string {
-  return blocks
-    .filter(block => block.type === 'text')
-    .map(block => block.text)
-    .join('')
+/** Text marker standing in for one durable image reference on the text-only wire. */
+function imagePlaceholder(block: ImageBlock): string {
+  const ref = block.attachment
+  return `[image-attachment] ${JSON.stringify({
+    attachmentId: ref.attachmentId,
+    mediaType: ref.mediaType,
+    width: ref.width,
+    height: ref.height,
+    bytes: ref.bytes,
+    ...ref.name === undefined ? {} : { name: ref.name },
+  })}`
 }
 
-/** Reject core image content before any text-flattening path can silently erase it. */
-function assertTextOnly(blocks: readonly ContentBlock[]): void {
-  if (contentHasImage(blocks)) {
-    throw new LlmError('The DeepSeek chat-completions adapter does not support image content.', 'UNSUPPORTED_CONTENT')
+/**
+ * Join blocks into one text string. Text passes through unchanged; durable
+ * image references become explicit `[image-attachment]` markers so the
+ * text-only DeepSeek wire keeps the model informed instead of erasing the
+ * block. `tool-result` blocks contribute only when `recurseToolResults` is
+ * set (the role:tool wire message), so their text never leaks into the user
+ * message. Unknown declaration-merged block types keep the adapter's
+ * documented extension fallback: skipped.
+ */
+function flattenText(blocks: readonly ContentBlock[], recurseToolResults = false): string {
+  let text = ''
+  for (const block of blocks) {
+    switch (block.type) {
+      case 'text':
+        text += block.text
+        break
+      case 'image':
+        text += imagePlaceholder(block)
+        break
+      case 'tool-result':
+        if (recurseToolResults) text += flattenText(block.content, true)
+        break
+      default:
+        // Merge-extensible union: unknown block types fall through and are skipped.
+    }
   }
+  return text
 }
 
 /** Serialize one assistant message (text + reasoning + tool calls). */
@@ -112,7 +142,6 @@ function serializeAssistant(message: Message): WireMessage {
 export function serializeMessages(messages: Message[]): WireMessage[] {
   const wire: WireMessage[] = []
   for (const message of messages) {
-    assertTextOnly(message.content)
     if (message.role === 'system') {
       wire.push({ role: 'system', content: flattenText(message.content) })
       continue
@@ -133,7 +162,7 @@ export function serializeMessages(messages: Message[]): WireMessage[] {
         role: 'tool',
         tool_call_id: result.toolCallId,
         // Empty tool output still needs SOME content on the wire.
-        content: flattenText(result.content) || '(no output)',
+        content: flattenText(result.content, true) || '(no output)',
       })
     }
   }

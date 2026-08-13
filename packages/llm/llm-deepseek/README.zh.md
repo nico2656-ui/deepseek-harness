@@ -70,6 +70,7 @@ DeepSeek 请求身份独立于应用归因。凭据解析成功后，每个提�
 - 适配器持有的 `off` 推理强度映射为 `thinking: {type: 'disabled'}`，绝不会以 `reasoning_effort: 'off'` 通过协议发送。
 - 第一个思考模式分片携带 `reasoning_content: ""`，系统会处理它（不会产生多余 reasoning 块）。
 - **推理回传规则**：对携带工具调用的 assistant 轮次，会将 `reasoning_content` 序列化回历史（思考模式 API 必需）；对不含工具调用的轮次，它会被丢弃（不会使用，可节省 token）。
+- **持久化图片引用绝不以图片形式通过协议**：文本-only 路由会把它们序列化为显式的 `[image-attachment] {"attachmentId":…,"mediaType":…,"width":…,"height":…,"bytes":…[,"name":…]}` 文本标记。该标记让模型保持知情，而不是悄悄抹掉该块；若改为抛错，则会卡死会话——该块是持久化历史，之后每一轮都会再次失败。
 - Cache 计量：`cacheReadTokens` ← `prompt_cache_hit_tokens` / `prompt_tokens_details.cached_tokens`；DeepSeek 不报告 cache-write 指标。
 
 ## 错误
@@ -82,7 +83,7 @@ DeepSeek 请求身份独立于应用归因。凭据解析成功后，每个提�
 
 #### 模型看到的内容
 
-所选 DeepSeek 模型会收到 harness 系统提示词、消息历史、工具 schema、stop sequence 和调用配置，不含适配器撰写的提示词文本。当之前的 assistant 轮次包含工具调用时，会按要求回传其推理内容；不含工具调用的轮次会省略推理。
+所选 DeepSeek 模型会收到 harness 系统提示词、消息历史、工具 schema、stop sequence 和调用配置，不含适配器撰写的提示词文本。当之前的 assistant 轮次包含工具调用时，会按要求回传其推理内容；不含工具调用的轮次会省略推理。历史中的持久化图片引用会以显式 `[image-attachment]` 文本标记到达，携带其 id、媒体类型、尺寸与字节数——该协议是文本-only 的，因此标记就是模型得知「存在一张图片」的方式。
 
 #### Token 影响
 
@@ -111,4 +112,4 @@ loop 保留的响应块会追加到下一个请求，并保留其较早可复用
 - **settings 的 `models` 列表会整体替换组合列表**：settings 层按字段合并，而数组是单个字段；按条目合并 catalog 需要带键的形状。
 - **未映射 `tool_choice`**：它不属于核心词汇（MVP 取舍，与 pi-ai twin 共享）。
 - **请求使用原始 `fetch`，而非 `@cordisjs/plugin-http`**：没有共享 proxy／拦截配置；采用暂缓到第二个适配器需要该功能时（`TODO(http)`）。
-- **序列化会将 user 与工具结果内容展平为文本块**：会跳过插件添加的块类型，空工具输出会以字面 `(no output)` 通过协议发送。
+- **序列化会将 user 与工具结果内容展平为文本块**：会跳过插件添加的块类型，持久化图片引用会变为 `[image-attachment]` 文本标记，空工具输出会以字面 `(no output)` 通过协议发送。

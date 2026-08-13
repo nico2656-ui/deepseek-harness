@@ -133,17 +133,78 @@ describe('serializeMessages', () => {
     expect(wire).toEqual([{ role: 'user', content: 'see chart' }])
   })
 
-  it('rejects image blocks instead of silently flattening them away', () => {
-    expect(() => serializeMessages([createUserMessage({
-      content: [{
-        type: 'image',
-        attachment: {
-          attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
-          mediaType: 'image/png', bytes: 68, width: 1, height: 1,
-        },
-      }],
-      source: { kind: 'plugin', plugin: 'test' },
-    })])).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_CONTENT' }))
+  it('substitutes image blocks with explicit text markers instead of silently erasing them', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [{
+          type: 'image',
+          attachment: {
+            attachmentId: AttachmentId(`sha256:${'a'.repeat(64)}`),
+            mediaType: 'image/png', bytes: 68, width: 1, height: 1,
+          },
+        }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+    ])
+    // A throw here would brick the session: the block is durable history, so
+    // every later turn would re-fail. The marker keeps the model informed.
+    expect(wire).toEqual([{
+      role: 'user',
+      content: `[image-attachment] {"attachmentId":"sha256:${'a'.repeat(64)}","mediaType":"image/png","width":1,"height":1,"bytes":68}`,
+    }])
+  })
+
+  it('substitutes nested tool-result image blocks without leaking them into the user message', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [
+          { type: 'text', text: 'here: ' },
+          {
+            type: 'tool-result',
+            toolCallId: CallId('call-1'),
+            content: [
+              { type: 'text', text: 'snapshot ' },
+              {
+                type: 'image',
+                attachment: {
+                  attachmentId: AttachmentId(`sha256:${'b'.repeat(64)}`),
+                  mediaType: 'image/jpeg', bytes: 10, width: 2, height: 3, name: 'pic.jpg',
+                },
+              },
+            ],
+          },
+        ],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+    ])
+    expect(wire).toEqual([
+      { role: 'user', content: 'here: ' },
+      {
+        role: 'tool',
+        tool_call_id: 'call-1',
+        content: `snapshot [image-attachment] {"attachmentId":"sha256:${'b'.repeat(64)}","mediaType":"image/jpeg","width":2,"height":3,"bytes":10,"name":"pic.jpg"}`,
+      },
+    ])
+  })
+
+  it('recurses through tool results nested inside tool results', () => {
+    const wire = serializeMessages([
+      createUserMessage({
+        content: [{
+          type: 'tool-result',
+          toolCallId: CallId('call-1'),
+          content: [{
+            type: 'tool-result',
+            toolCallId: CallId('call-2'),
+            content: [{ type: 'text', text: 'deep ' }],
+          }],
+        }],
+        source: { kind: 'plugin', plugin: 'test' },
+      }),
+    ])
+    // No user wire message (no top-level text), and the role:tool message
+    // flattens the nested result recursively.
+    expect(wire).toEqual([{ role: 'tool', tool_call_id: 'call-1', content: 'deep ' }])
   })
 
   it('emits an empty user message rather than dropping block-less messages', () => {
